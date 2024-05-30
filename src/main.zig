@@ -86,29 +86,35 @@ pub const Handler = struct {
     }
 
     pub fn on_request(self: *Self, r: zap.Request) void {
-        if (r.getParamSlice("q")) |the_query| {
-            var arena = std.heap.ArenaAllocator.init(self.allocator);
-            defer arena.deinit();
-            const allocator = arena.allocator();
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
 
-            var output = ArrayList(u8).init(allocator);
-            var writer = output.writer();
-            writer.print("<html><body><h1>", .{}) catch return;
-            var iter = mem.splitScalar(u8, the_query, '\n');
-            while (iter.next()) |element| {
-                const package = get_package_name(element);
-                writer.print("{s} -- ", .{package}) catch return;
-                for (self.teams.items) |t| {
-                    if (t.containsPackage(package)) {
-                        writer.print("<a href=''>{s}</a>&nbsp;", .{t.name}) catch return;
+        r.parseQuery();
+        if (r.getParamStr(allocator, "q", false)) |maybe_str| {
+            if (maybe_str) |*s| {
+                const the_query = s.str;
+                var output = ArrayList(u8).init(allocator);
+                var writer = output.writer();
+                writer.print("<html><body><h1>", .{}) catch return;
+                var iter = mem.splitScalar(u8, the_query, '\n');
+                while (iter.next()) |element| {
+                    const package = get_package_name(element);
+                    writer.print("{s} -- ", .{package}) catch return;
+                    for (self.teams.items) |t| {
+                        if (t.containsPackage(package)) {
+                            writer.print("<a href=''>{s}</a>&nbsp;", .{t.name}) catch return;
+                        }
                     }
+                    writer.print("<br>", .{}) catch return;
                 }
-                writer.print("<br>", .{}) catch return;
+                writer.print("</h1></body></html>", .{}) catch return;
+                r.sendBody(output.items) catch return;
+            } else {
+                r.sendBody("<html><body><h1>Hello!</h1></body></html>") catch return;
             }
-            writer.print("</h1></body></html>", .{}) catch return;
-            r.sendBody(output.items) catch return;
-        } else {
-            r.sendBody("<html><body><h1>Hello!</h1></body></html>") catch return;
+        } else |err| {
+            std.log.err("cannot check for `q` param: {any}\n", .{err});
         }
     }
 };

@@ -9,30 +9,22 @@ const Team = struct {
 
     allocator: mem.Allocator,
     name: []const u8,
-    cache: std.ArrayList([]const u8),
     packages: std.ArrayList([]const u8),
 
     pub fn init(allocator: mem.Allocator, name: []const u8) Self {
         return .{
             .allocator = allocator,
             .name = allocator.dupe(u8, name) catch "",
-            .cache = ArrayList([]const u8).init(allocator),
             .packages = ArrayList([]const u8).init(allocator),
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.packages.deinit();
-        for (self.cache.items) |c| {
-            self.allocator.free(c);
+        self.allocator.free(self.name);
+        for (self.packages.items) |p| {
+            self.allocator.free(p);
         }
-        self.cache.deinit();
-    }
-
-    pub fn readFile(self: *Self, file: std.fs.File) []const u8 {
-        const content = std.fs.File.readToEndAlloc(file, self.allocator, @as(usize, 1_000_000)) catch return "";
-        self.cache.append(content) catch return content;
-        return content;
+        self.packages.deinit();
     }
 
     pub fn containsPackage(self: *const Self, package: []const u8) bool {
@@ -71,17 +63,20 @@ pub const Handler = struct {
     }
 
     pub fn refresh(self: *Self) void {
-        var teams = std.ArrayList(Team).init(self.allocator);
+        const allocator = self.allocator;
+        const buf = allocator.alloc(u8, 1_000_000) catch return;
+
+        var teams = std.ArrayList(Team).init(allocator);
         var dir = std.fs.cwd().openDir("packages", .{ .iterate = true }) catch return;
         var iter = dir.iterate();
         while (iter.next() catch return) |entry| {
             var file = dir.openFile(entry.name, .{}) catch continue;
             defer file.close();
-            var team = Team.init(self.allocator, entry.name);
-            const content = team.readFile(file);
-            var lines = mem.tokenize(u8, content, "\n");
+            var team = Team.init(allocator, entry.name);
+            const len = std.fs.File.readAll(file, buf) catch return;
+            var lines = mem.tokenize(u8, buf[0..len], "\n");
             while (lines.next()) |line| {
-                team.packages.append(line) catch break;
+                team.packages.append(allocator.dupe(u8, line) catch return) catch return;
             }
             teams.append(team) catch break;
         }
@@ -92,39 +87,26 @@ pub const Handler = struct {
 
     pub fn on_request(self: *Self, r: zap.Request) void {
         if (r.getParamSlice("q")) |the_query| {
-            const allocator = self.allocator;
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const allocator = arena.allocator();
 
-            var elements = std.ArrayList([]const u8).init(allocator);
-            defer {
-                for (elements.items) |e| {
-                    allocator.free(e);
-                }
-                elements.deinit();
-            }
-
+            var output = ArrayList(u8).init(allocator);
+            var writer = output.writer();
+            writer.print("<html><body><h1>", .{}) catch return;
             var iter = mem.splitScalar(u8, the_query, '\n');
             while (iter.next()) |element| {
                 const package = get_package_name(element);
-                var teams = std.ArrayList([]const u8).init(allocator);
-                defer {
-                    for (teams.items) |s| {
-                        allocator.free(s);
-                    }
-                    teams.deinit();
-                }
-
+                writer.print("{s} -- ", .{package}) catch return;
                 for (self.teams.items) |t| {
                     if (t.containsPackage(package)) {
-                        teams.append(fmt.allocPrint(allocator, "<a href=''>{s}</a>", .{t.name}) catch break) catch break;
+                        writer.print("<a href=''>{s}</a>&nbsp;", .{t.name}) catch return;
                     }
                 }
-                elements.append(fmt.allocPrint(allocator, "{s} -- {s}", .{ package, mem.join(allocator, "", teams.items) catch "" }) catch break) catch break;
+                writer.print("<br>", .{}) catch return;
             }
-            const output = mem.join(allocator, "\n", elements.items) catch "OOM";
-            defer allocator.free(output);
-            const body = fmt.allocPrint(allocator, "<html><body><h1>{s}</h1></body></html>", .{output}) catch return;
-            defer allocator.free(body);
-            r.sendBody(body) catch return;
+            writer.print("</h1></body></html>", .{}) catch return;
+            r.sendBody(output.items) catch return;
         } else {
             r.sendBody("<html><body><h1>Hello!</h1></body></html>") catch return;
         }

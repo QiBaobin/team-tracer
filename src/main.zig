@@ -27,6 +27,10 @@ const Team = struct {
         self.packages.deinit();
     }
 
+    pub fn addPackage(self: *Self, package: []const u8) !void {
+        try self.packages.append(try self.allocator.dupe(u8, package));
+    }
+
     pub fn containsPackage(self: *const Self, package: []const u8) bool {
         for (self.packages.items) |p| {
             if (mem.startsWith(u8, package, p)) {
@@ -43,12 +47,10 @@ pub const Handler = struct {
     teams: std.ArrayList(Team),
 
     pub fn init(allocator: mem.Allocator) Self {
-        var self = Self{
+        return Self{
             .allocator = allocator,
             .teams = ArrayList(Team).init(allocator),
         };
-        self.refresh();
-        return self;
     }
 
     fn deinit_teams(teams: *ArrayList(Team)) void {
@@ -65,18 +67,22 @@ pub const Handler = struct {
     pub fn refresh(self: *Self) void {
         const allocator = self.allocator;
         const buf = allocator.alloc(u8, 1_000_000) catch return;
+        defer allocator.free(buf);
 
         var teams = std.ArrayList(Team).init(allocator);
-        var dir = std.fs.cwd().openDir("packages", .{ .iterate = true }) catch return;
+        var dir = std.fs.cwd().openDir("packages", .{ .iterate = true }) catch {
+            teams.deinit();
+            return;
+            };
         var iter = dir.iterate();
-        while (iter.next() catch return) |entry| {
+        while (iter.next() catch null) |entry| {
             var file = dir.openFile(entry.name, .{}) catch continue;
             defer file.close();
             var team = Team.init(allocator, entry.name);
-            const len = std.fs.File.readAll(file, buf) catch return;
+            const len = std.fs.File.readAll(file, buf) catch continue;
             var lines = mem.tokenize(u8, buf[0..len], "\n");
             while (lines.next()) |line| {
-                team.packages.append(allocator.dupe(u8, line) catch return) catch return;
+                team.addPackage(line) catch break;
             }
             teams.append(team) catch break;
         }
@@ -138,6 +144,7 @@ pub fn main() !void {
 
         var handler = Handler.init(allocator);
         defer handler.deinit();
+        handler.refresh();
         try router.handle_func("/", &handler, &Handler.on_request);
         try router.handle_func("/init", &handler, &Handler.refresh);
 

@@ -45,6 +45,7 @@ pub const Handler = struct {
 
     allocator: mem.Allocator,
     teams: std.ArrayList(Team),
+    lock: std.Thread.Mutex = .{},
 
     pub fn init(allocator: mem.Allocator) Self {
         return Self{
@@ -64,7 +65,10 @@ pub const Handler = struct {
         deinit_teams(&self.teams);
     }
 
-    pub fn refresh(self: *Self) void {
+    pub fn fetchTeams(self: *Self) void {
+        if (!self.lock.tryLock()) return;
+        defer self.lock.unlock();
+
         const allocator = self.allocator;
         const buf = allocator.alloc(u8, 1_000_000) catch return;
         defer allocator.free(buf);
@@ -73,7 +77,7 @@ pub const Handler = struct {
         var dir = std.fs.cwd().openDir("packages", .{ .iterate = true }) catch {
             teams.deinit();
             return;
-            };
+        };
         var iter = dir.iterate();
         while (iter.next() catch null) |entry| {
             var file = dir.openFile(entry.name, .{}) catch continue;
@@ -91,7 +95,12 @@ pub const Handler = struct {
         deinit_teams(&old);
     }
 
-    pub fn on_request(self: *Self, r: zap.Request) void {
+    pub fn onRefresh(self: *Self, r: zap.Request) void {
+        self.fetchTeams();
+        r.sendBody("Teams are refreshed!") catch return;
+    }
+
+    pub fn onRequest(self: *Self, r: zap.Request) void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const allocator = arena.allocator();
@@ -105,7 +114,7 @@ pub const Handler = struct {
                 writer.print("<html><body><h1>", .{}) catch return;
                 var iter = mem.splitScalar(u8, the_query, '\n');
                 while (iter.next()) |element| {
-                    const package = get_package_name(element);
+                    const package = getPackageName(element);
                     writer.print("{s} -- ", .{package}) catch return;
                     for (self.teams.items) |t| {
                         if (t.containsPackage(package)) {
@@ -125,8 +134,8 @@ pub const Handler = struct {
     }
 };
 
-fn not_found(req: zap.Request) void {
-    std.debug.print("not found handler", .{});
+fn notFound(req: zap.Request) void {
+    std.debug.print("not found handler for {s}", .{req.path orelse ""});
 
     req.sendBody("Not found") catch return;
 }
@@ -138,15 +147,15 @@ pub fn main() !void {
 
     {
         var router = zap.Router.init(allocator, .{
-            .not_found = not_found,
+            .not_found = notFound,
         });
         defer router.deinit();
 
         var handler = Handler.init(allocator);
         defer handler.deinit();
-        handler.refresh();
-        try router.handle_func("/", &handler, &Handler.on_request);
-        try router.handle_func("/init", &handler, &Handler.refresh);
+        handler.fetchTeams();
+        try router.handle_func("/", &handler, &Handler.onRequest);
+        try router.handle_func("/init", &handler, &Handler.onRefresh);
 
         var listener = zap.HttpListener.init(.{
             .port = 9000,
@@ -160,12 +169,12 @@ pub fn main() !void {
         // start worker threads
         zap.start(.{
             .threads = 2,
-            .workers = 1,
+            .workers = 2,
         });
     }
 }
 
-fn get_package_name(trace: []const u8) []const u8 {
+fn getPackageName(trace: []const u8) []const u8 {
     var package = trace;
     if (mem.indexOfScalar(u8, trace, '(')) |i| {
         var j: usize = i;
@@ -178,6 +187,6 @@ fn get_package_name(trace: []const u8) []const u8 {
 }
 
 test "test package name extraction" {
-    try std.testing.expectEqualStrings("a.b.class.method", get_package_name("a.b.class.method"));
-    try std.testing.expectEqualStrings("a.b", get_package_name("a.b.class.method(file:line)"));
+    try std.testing.expectEqualStrings("a.b.class.method", getPackageName("a.b.class.method"));
+    try std.testing.expectEqualStrings("a.b", getPackageName("a.b.class.method(file:line)"));
 }

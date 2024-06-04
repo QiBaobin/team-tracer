@@ -45,24 +45,36 @@ pub const Handler = struct {
 
     allocator: mem.Allocator,
     teams: std.ArrayList(Team),
+    links: std.StringHashMap([]const u8),
     lock: std.Thread.Mutex = .{},
 
     pub fn init(allocator: mem.Allocator) Self {
         return Self{
             .allocator = allocator,
             .teams = ArrayList(Team).init(allocator),
+            .links = std.StringHashMap([]const u8).init(allocator),
         };
     }
 
-    fn deinit_teams(teams: *ArrayList(Team)) void {
+    fn deinit_teams(_: *Self, teams: *ArrayList(Team)) void {
         for (teams.items) |*t| {
             t.deinit();
         }
         teams.deinit();
     }
 
+    fn deinit_links(self: *Self, links: *std.StringHashMap([]const u8)) void {
+        var links_iter = links.iterator();
+        while (links_iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        links.deinit();
+    }
+
     pub fn deinit(self: *Self) void {
-        deinit_teams(&self.teams);
+        self.deinit_teams(&self.teams);
+        self.deinit_links(&self.links);
     }
 
     pub fn fetchTeams(self: *Self) void {
@@ -92,7 +104,26 @@ pub const Handler = struct {
         }
         var old = self.teams;
         self.teams = teams;
-        deinit_teams(&old);
+        self.deinit_teams(&old);
+
+        var links = std.StringHashMap([]const u8).init(allocator);
+        var properties = std.fs.cwd().openFile("teams.properties", .{}) catch {
+            links.deinit();
+            return;
+        };
+        defer properties.close();
+        if (std.fs.File.readAll(properties, buf) catch null) |len| {
+            var lines = mem.tokenize(u8, buf[0..len], "\n");
+            while (lines.next()) |line| {
+                if (mem.indexOfScalar(u8, line, '=')) |i| {
+                    links.put(std.ascii.allocLowerString(allocator, line[0..i]) catch break, allocator.dupe(u8, line[i + 1 ..]) catch break) catch continue;
+                }
+            }
+        }
+
+        var old_links = self.links;
+        self.links = links;
+        self.deinit_links(&old_links);
     }
 
     pub fn onRefresh(self: *Self, r: zap.Request) void {
@@ -113,12 +144,15 @@ pub const Handler = struct {
                 var writer = output.writer();
                 writer.print("<html><body><h1>", .{}) catch return;
                 var iter = mem.splitScalar(u8, the_query, '\n');
+                var buf: [1024]u8 = undefined;
                 while (iter.next()) |element| {
                     const package = getPackageName(element);
                     writer.print("{s} -- ", .{package}) catch return;
                     for (self.teams.items) |t| {
                         if (t.containsPackage(package)) {
-                            writer.print("<a href=''>{s}</a>&nbsp;", .{t.name}) catch return;
+                            const name = std.ascii.lowerString(&buf, t.name);
+                            const link = self.links.get(name) orelse "";
+                            writer.print("<a href='{s}' target='_blank'>{s}</a>&nbsp;", .{ link, t.name }) catch return;
                         }
                     }
                     writer.print("<br>", .{}) catch return;
